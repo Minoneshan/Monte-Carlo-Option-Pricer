@@ -10,6 +10,7 @@ find_package(OpenMP REQUIRED)
 add_library(montecarlo STATIC
     src/monte_carlo_pricer.cpp
     src/black_scholes.cpp
+    src/surface_recalibrator.cpp
 )
 
 target_include_directories(montecarlo
@@ -29,3 +30,6 @@ target_link_libraries(pricer PRIVATE montecarlo)
 
 add_executable(pricer_tests tests/test_pricer.cpp)
 target_link_libraries(pricer_tests PRIVATE montecarlo)
+
+add_executable(surface_tests tests/test_surface.cpp)
+target_link_libraries(surface_tests PRIVATE montecarlo)

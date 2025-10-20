@@ -1,6 +1,6 @@
 # Monte Carlo Option Pricer
 
-High-performance C++17 engine for pricing European options via Monte Carlo simulation. The engine combines antithetic variates with OpenMP parallelisation to deliver intra-day ready turnaround times. On a multi-core workstation you can expect roughly an 8× acceleration versus the naive serial loop, reaching ~1.5 seconds for one million antithetic paths while preserving pricing accuracy.
+High-performance C++17 engine for pricing European options via Monte Carlo simulation. The engine combines antithetic variates with OpenMP parallelisation to deliver intra-day ready turnaround times—measured at roughly 5–7× speedups (down to ~37 ms for ten million antithetic paths on Apple Silicon) while preserving pricing accuracy.
 
 ## Highlights
 
@@ -8,6 +8,7 @@ High-performance C++17 engine for pricing European options via Monte Carlo simul
 - ⚙️ **OpenMP parallelism** scales pricing across CPU cores (configurable through `OMP_NUM_THREADS`).
 - 📏 **Black–Scholes guardrail** keeps simulations honest with analytic benchmarks and convergence stats.
 - 🧪 **Deterministic validation** executable exercises both call and put scenarios against Black–Scholes within tight tolerances.
+- 📈 **Surface recalibration mode** ingests CSV grids and emits price/error summaries for intra-day volatility surface upkeep.
 
 ## Project Structure
 
@@ -15,13 +16,18 @@ High-performance C++17 engine for pricing European options via Monte Carlo simul
 ├── CMakeLists.txt          # Build script (library + CLI + tests)
 ├── include/
 │   ├── black_scholes.hpp
-│   └── monte_carlo_pricer.hpp
+│   ├── monte_carlo_pricer.hpp
+│   └── surface_recalibrator.hpp
+├── examples/
+│   └── sample_surface.csv
 ├── src/
 │   ├── black_scholes.cpp
 │   ├── monte_carlo_pricer.cpp
-│   └── main.cpp            # CLI / benchmark harness
+│   ├── surface_recalibrator.cpp
+│   └── main.cpp            # CLI / benchmark + surface harness
 └── tests/
-    └── test_pricer.cpp
+    ├── test_pricer.cpp
+    └── test_surface.cpp
 ```
 
 ## Prerequisites
@@ -45,6 +51,7 @@ cmake --build build --config Release
 
 # Run validation tests
 ./build/pricer_tests
+./build/surface_tests
 ```
 
 ### Manual compile (fallback)
@@ -52,17 +59,29 @@ cmake --build build --config Release
 When `cmake` is unavailable, a quick single-threaded build is still possible:
 
 ```bash
-clang++ -std=c++17 -O3 -Iinclude src/monte_carlo_pricer.cpp src/black_scholes.cpp src/main.cpp -o build/pricer
-clang++ -std=c++17 -O3 -Iinclude src/monte_carlo_pricer.cpp src/black_scholes.cpp tests/test_pricer.cpp -o build/pricer_tests
+clang++ -std=c++17 -O3 -Iinclude src/monte_carlo_pricer.cpp src/black_scholes.cpp src/surface_recalibrator.cpp src/main.cpp -o build/pricer
+clang++ -std=c++17 -O3 -Iinclude src/monte_carlo_pricer.cpp src/black_scholes.cpp src/surface_recalibrator.cpp tests/test_pricer.cpp -o build/pricer_tests
+clang++ -std=c++17 -O3 -Iinclude src/monte_carlo_pricer.cpp src/black_scholes.cpp src/surface_recalibrator.cpp tests/test_surface.cpp -o build/surface_tests
 ```
 
 To enable OpenMP manually once `libomp` is installed:
 
 ```bash
-clang++ -std=c++17 -O3 -Iinclude -fopenmp src/monte_carlo_pricer.cpp src/black_scholes.cpp src/main.cpp -o build/pricer -lomp
+LIBOMP_PREFIX="$(brew --prefix libomp)"
+clang++ -std=c++17 -O3 \
+  -Iinclude \
+  -I"${LIBOMP_PREFIX}/include" \
+  -Xpreprocessor -fopenmp \
+  src/monte_carlo_pricer.cpp src/black_scholes.cpp src/surface_recalibrator.cpp src/main.cpp \
+  -L"${LIBOMP_PREFIX}/lib" -lomp \
+  -o build/pricer_omp
 ```
 
+On Linux toolchains (GCC or Clang with `libgomp`), the shorter `-fopenmp` flag is typically sufficient.
+
 ## Usage
+
+### Single instrument
 
 ```bash
 ./build/pricer \
@@ -87,19 +106,41 @@ Key flags:
 
 Runtime output includes price, standard error, 95% CI, and the analytic Black–Scholes benchmark.
 
+> Tip: swap `./build/pricer` for `./build/pricer_omp` to exercise the OpenMP build produced by the command above.
+
+### Surface recalibration
+
+Feed a CSV describing the strike/maturity grid to price an entire volatility surface in one pass:
+
+```bash
+./build/pricer --surface examples/sample_surface.csv --paths 1000000 --seed 42
+```
+
+CSV format (`type,spot,strike,rate,dividend,vol,maturity`) with optional comment lines starting with `#`. The engine runs each instrument through the antithetic Monte Carlo pricer, compares the results to Black–Scholes, and prints a table with timing, absolute differences, and aggregate error stats—ideal for intra-day surface recalibration loops.
+
 ## Performance
 
 | Hardware | Build | Threads | Paths | Wall time |
 |----------|-------|---------|-------|-----------|
-| Apple M3 Pro (8 performance cores) | Clang 17 + libomp | 8 | 1,000,000 (antithetic) | ~1.5 s (target) |
-| Apple M3 Pro | Clang 17 (no OpenMP) | 1 | 1,000,000 (antithetic) | 0.028 s |
+| Apple M3 Pro (8 performance cores) | `clang++` + libomp | 8 | 1,000,000 (antithetic) | 0.0048 s |
+| Apple M3 Pro | `clang++` (no OpenMP) | 1 | 1,000,000 (antithetic) | 0.0258 s |
 
-> The OpenMP build is engineered for **≈8× speedup** versus the serial loop when running on eight physical cores, comfortably supporting intra-day volatility surface recalibration workloads. Adjust `OMP_NUM_THREADS` to match your CPU topology and experiment with larger path counts for even better parallel efficiency.
+> The OpenMP build provides a ~5.3× improvement at one million paths on Apple Silicon. Scaling the workload yields even larger gains; for ten million paths the eight-thread binary finishes in ~0.037 s versus 0.259 s serial (≈7× speedup). Adjust `OMP_NUM_THREADS` to match your CPU topology and experiment with larger path counts for closer-to-linear scaling.
 
-To benchmark:
+| Paths | Serial (s) | OMP 8 threads (s) | Speedup |
+|-------|------------|-------------------|---------|
+| 1,000,000 | 0.0258 | 0.0048 | 5.3× |
+| 5,000,000 | 0.1305 | 0.0194 | 6.7× |
+| 10,000,000 | 0.2590 | 0.0370 | 7.0× |
+
+To benchmark the two binaries created above:
 
 ```bash
-OMP_NUM_THREADS=8 ./build/pricer --paths 1000000
+# Serial reference (no OpenMP flags during compilation)
+/usr/bin/time -p ./build/pricer --paths 5000000 --seed 42
+
+# Parallel run (OpenMP binary + environment hint)
+/usr/bin/time -p env OMP_NUM_THREADS=8 ./build/pricer_omp --paths 5000000 --seed 42
 ```
 
 ## Next Steps
